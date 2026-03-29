@@ -1,0 +1,19 @@
+# Environment variables — NEVER commit real credentials
+.env
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Test output
+reports/
+screenshots/
+test-results/
+
+# Chrome profile (contains session data / credentials)
+auth/chrome_profile/
+
+# Debug screenshots
+debug_tc03.png
