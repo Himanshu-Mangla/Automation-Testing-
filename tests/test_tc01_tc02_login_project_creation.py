@@ -49,6 +49,9 @@ USERNAME    = os.getenv("APP_USERNAME")
 PASSWORD    = os.getenv("PASSWORD")
 BASE_DOMAIN = APP_URL.split("/login")[0] if APP_URL and "/login" in APP_URL else APP_URL
 
+# CI detection — GitHub Actions sets CI=true automatically
+CI_MODE = os.getenv("CI", "false").lower() == "true"
+
 MFA_WAIT_S = 300
 MFA_POLL_S = 5
 
@@ -66,10 +69,22 @@ def _log(tag, msg):
 
 def _build_driver() -> webdriver.Chrome:
     AUTH_DIR.mkdir(parents=True, exist_ok=True)
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
     options = Options()
-    options.add_argument("--start-maximized")
+
+    if CI_MODE:
+        # Headless mode for GitHub Actions (no display, no persistent profile)
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        _log("TC-01", "CI mode — headless Chrome, no profile directory.")
+    else:
+        # Local mode — persistent profile for MFA bypass
+        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        options.add_argument("--start-maximized")
+        options.add_argument(f"--user-data-dir={PROFILE_DIR}")
+
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-infobars")
@@ -77,15 +92,14 @@ def _build_driver() -> webdriver.Chrome:
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument(f"--user-data-dir={PROFILE_DIR}")
 
     raw = ChromeDriverManager().install()
     exe = os.path.join(os.path.dirname(raw), "chromedriver.exe")
-    driver = webdriver.Chrome(
-        service=Service(exe if os.path.isfile(exe) else raw),
-        options=options,
-    )
-    driver.maximize_window()
+    if not os.path.isfile(exe):
+        exe = raw
+    driver = webdriver.Chrome(service=Service(exe), options=options)
+    if not CI_MODE:
+        driver.maximize_window()
     driver.set_page_load_timeout(60)
     driver.implicitly_wait(0)
     return driver
@@ -247,6 +261,63 @@ def _delete_session():
     _log("TC-01", "Stale session deleted — fresh login required.")
 
 
+def _ci_login(driver):
+    """
+    CI mode login: injects session cookies exported from a local run.
+    Requires SESSION_COOKIES GitHub Secret — a JSON string of the saved
+    auth_cookies.json file produced after a successful local MFA login.
+    """
+    cookies_json = os.getenv("SESSION_COOKIES", "").strip()
+    if not cookies_json:
+        raise Exception(
+            "CI mode: SESSION_COOKIES environment variable is not set.\n"
+            "Run export_session.py locally after a successful login, then add\n"
+            "the output as a GitHub Secret named SESSION_COOKIES."
+        )
+
+    try:
+        data         = json.loads(cookies_json)
+        cookies      = data.get("cookies", []) if isinstance(data, dict) else data
+        local_storage = data.get("localStorage", {}) if isinstance(data, dict) else {}
+    except json.JSONDecodeError as exc:
+        raise Exception(f"CI mode: SESSION_COOKIES is not valid JSON — {exc}")
+
+    # Must visit the domain before setting cookies
+    driver.get(BASE_DOMAIN)
+    time.sleep(2)
+
+    # Inject each cookie (strip fields Selenium does not accept)
+    injected = 0
+    for cookie in cookies:
+        try:
+            clean = {k: v for k, v in cookie.items()
+                     if k in ("name", "value", "domain", "path", "secure", "httpOnly", "expiry")}
+            driver.add_cookie(clean)
+            injected += 1
+        except Exception:
+            pass
+    _log("TC-01", f"Injected {injected}/{len(cookies)} cookies.")
+
+    # Restore localStorage tokens (JWT etc.)
+    for key, val in local_storage.items():
+        try:
+            driver.execute_script("localStorage.setItem(arguments[0], arguments[1]);", key, val)
+        except Exception:
+            pass
+
+    # Reload so the app picks up the session
+    driver.refresh()
+    time.sleep(3)
+
+    current = driver.current_url
+    if "login" in current.lower():
+        raise Exception(
+            f"CI cookie injection failed — still on login page: {current}\n"
+            "Cookies may have expired. Re-run export_session.py locally and update the GitHub Secret."
+        )
+    _log("TC-01", f"CI session restored. URL: {current}")
+
+
 # ── TC-02: Project creation helpers ──────────────────────────────────────────
 
 def _modal_open(driver):
@@ -381,31 +452,36 @@ class TestTC01TC02LoginAndProjectCreation:
             #  TC-01: LOGIN
             # ════════════════════════════════════════════════════════
 
-            _log("TC-01", "Step 1 — Checking for existing cookie session …")
-            stamp_valid = _session_stamp_valid()
+            _log("TC-01", f"Step 1 — Mode: {'CI (cookie injection)' if CI_MODE else 'Local (Chrome profile)'}")
 
-            _log("TC-01", "Step 2 — Launching Chrome with persistent profile …")
+            _log("TC-01", "Step 2 — Launching Chrome …")
             driver = _build_driver()
             time.sleep(2)
 
-            if stamp_valid:
-                _log("TC-01", "Step 3 — Verifying session via persistent profile …")
-                on_dashboard = _is_on_dashboard(driver)
-
-                if on_dashboard:
-                    _log("TC-01", "Session restored successfully — MFA bypassed.")
-                else:
-                    _log("TC-01", "Session rejected — performing fresh login …")
-                    driver.quit(); driver = None
-                    _delete_session()
-                    driver = _build_driver(); time.sleep(2)
-                    _do_manual_login(driver)
-                    _save_session(driver)
+            if CI_MODE:
+                # ── CI path: inject cookies from SESSION_COOKIES secret ──────
+                _log("TC-01", "Step 3 — Restoring session from SESSION_COOKIES secret …")
+                _ci_login(driver)
             else:
-                _log("TC-01", "Step 3 — Starting manual SSO login …")
-                _do_manual_login(driver)
-                _log("TC-01", "Step 4 — Saving session …")
-                _save_session(driver)
+                # ── Local path: Chrome persistent profile / MFA bypass ───────
+                stamp_valid = _session_stamp_valid()
+                if stamp_valid:
+                    _log("TC-01", "Step 3 — Verifying session via persistent profile …")
+                    on_dashboard = _is_on_dashboard(driver)
+                    if on_dashboard:
+                        _log("TC-01", "Session restored successfully — MFA bypassed.")
+                    else:
+                        _log("TC-01", "Session rejected — performing fresh login …")
+                        driver.quit(); driver = None
+                        _delete_session()
+                        driver = _build_driver(); time.sleep(2)
+                        _do_manual_login(driver)
+                        _save_session(driver)
+                else:
+                    _log("TC-01", "Step 3 — Starting manual SSO login …")
+                    _do_manual_login(driver)
+                    _log("TC-01", "Step 4 — Saving session …")
+                    _save_session(driver)
 
             assert "login" not in driver.current_url.lower(), \
                 f"Expected dashboard after login but got: {driver.current_url}"

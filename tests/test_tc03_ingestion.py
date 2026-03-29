@@ -19,6 +19,7 @@ Steps:
   13. Check the Synced Project Files table and log all files with 'Failed' status.
 """
 
+import json
 import os
 import time
 from pathlib import Path
@@ -40,6 +41,9 @@ PROFILE_DIR = AUTH_DIR / "chrome_profile"
 APP_URL     = os.getenv("APP_URL")
 BASE_DOMAIN = APP_URL.split("/login")[0] if APP_URL and "/login" in APP_URL else APP_URL
 
+# CI detection — GitHub Actions sets CI=true automatically
+CI_MODE = os.getenv("CI", "false").lower() == "true"
+
 SEARCH_TERM  = "Sanity"
 PROJECT_NAME = "Sanity Test"
 
@@ -50,7 +54,17 @@ def _log(msg: str):
 
 def _build_driver() -> webdriver.Chrome:
     options = Options()
-    options.add_argument("--start-maximized")
+
+    if CI_MODE:
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        _log("CI mode — headless Chrome, no profile directory.")
+    else:
+        options.add_argument("--start-maximized")
+        options.add_argument(f"--user-data-dir={PROFILE_DIR}")
+
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-infobars")
@@ -58,18 +72,60 @@ def _build_driver() -> webdriver.Chrome:
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument(f"--user-data-dir={PROFILE_DIR}")
 
-    raw    = ChromeDriverManager().install()
-    exe    = os.path.join(os.path.dirname(raw), "chromedriver.exe")
-    driver = webdriver.Chrome(
-        service=Service(exe if os.path.isfile(exe) else raw),
-        options=options,
-    )
-    driver.maximize_window()
+    raw = ChromeDriverManager().install()
+    exe = os.path.join(os.path.dirname(raw), "chromedriver.exe")
+    if not os.path.isfile(exe):
+        exe = raw
+    driver = webdriver.Chrome(service=Service(exe), options=options)
+    if not CI_MODE:
+        driver.maximize_window()
     driver.set_page_load_timeout(60)
     driver.implicitly_wait(0)
     return driver
+
+
+def _ci_login(driver) -> None:
+    """Inject session cookies from SESSION_COOKIES env var (CI mode)."""
+    cookies_json = os.getenv("SESSION_COOKIES", "").strip()
+    if not cookies_json:
+        raise Exception(
+            "CI mode: SESSION_COOKIES is not set. "
+            "Run export_session.py locally and add output as GitHub Secret."
+        )
+    data          = json.loads(cookies_json)
+    cookies       = data.get("cookies", []) if isinstance(data, dict) else data
+    local_storage = data.get("localStorage", {}) if isinstance(data, dict) else {}
+
+    driver.get(BASE_DOMAIN)
+    time.sleep(2)
+
+    injected = 0
+    for cookie in cookies:
+        try:
+            clean = {k: v for k, v in cookie.items()
+                     if k in ("name", "value", "domain", "path", "secure", "httpOnly", "expiry")}
+            driver.add_cookie(clean)
+            injected += 1
+        except Exception:
+            pass
+    _log(f"Injected {injected}/{len(cookies)} cookies.")
+
+    for key, val in local_storage.items():
+        try:
+            driver.execute_script("localStorage.setItem(arguments[0], arguments[1]);", key, val)
+        except Exception:
+            pass
+
+    driver.refresh()
+    time.sleep(3)
+
+    if "login" in driver.current_url.lower():
+        raise Exception(
+            f"CI cookie injection failed — still on login: {driver.current_url}. "
+            "Cookies may have expired. Re-run export_session.py and update the secret."
+        )
+    _log(f"CI session restored. URL: {driver.current_url}")
 
 
 def _w(driver: webdriver.Chrome, timeout: int = 60) -> WebDriverWait:
@@ -87,20 +143,23 @@ class TestTC03ProjectSearch:
     def test_project_search_and_navigation(self):
         driver = None
         try:
-            # ── Step 1: Login via saved session ───────────────────────────────
-            _log("Step 1 — Launching Chrome with saved session …")
+            # ── Step 1: Login ──────────────────────────────────────────────────
+            _log(f"Step 1 — Launching Chrome ({'CI cookie mode' if CI_MODE else 'local profile mode'}) …")
             driver = _build_driver()
             time.sleep(2)
 
-            driver.get(BASE_DOMAIN)
-            time.sleep(2)
+            if CI_MODE:
+                _ci_login(driver)
+            else:
+                driver.get(BASE_DOMAIN)
+                time.sleep(2)
+                # Wait until redirected to a non-login page (session restored)
+                _w(driver).until(
+                    lambda d: BASE_DOMAIN in d.current_url
+                    and "login" not in d.current_url.lower()
+                )
+                time.sleep(2)
 
-            # Wait until redirected to a non-login page (session restored)
-            _w(driver).until(
-                lambda d: BASE_DOMAIN in d.current_url
-                and "login" not in d.current_url.lower()
-            )
-            time.sleep(2)
             _log(f"Logged in: {driver.current_url}")
 
             # ── Step 2: Click 'View All' button ───────────────────────────────

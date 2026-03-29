@@ -18,10 +18,11 @@ jobs:
     timeout-minutes: 60
 
     env:
-      HEADLESS: "true"
-      BASE_URL:       ${{ secrets.BASE_URL }}
-      SSO_EMAIL:      ${{ secrets.SSO_EMAIL }}
-      SSO_PASSWORD:   ${{ secrets.SSO_PASSWORD }}
+      CI: "true"
+      APP_URL:          ${{ secrets.APP_URL }}
+      APP_USERNAME:     ${{ secrets.APP_USERNAME }}
+      PASSWORD:         ${{ secrets.PASSWORD }}
+      SESSION_COOKIES:  ${{ secrets.SESSION_COOKIES }}
 
     steps:
       # ── 1. Checkout code ────────────────────────────────────────────────────
