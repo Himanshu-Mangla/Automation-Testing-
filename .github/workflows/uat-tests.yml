@@ -1,0 +1,83 @@
+name: ERM UAT Automation
+
+on:
+  # Run manually from GitHub UI (Actions tab → Run workflow)
+  workflow_dispatch:
+
+  # Auto-run on push to master
+  push:
+    branches: [master]
+
+  # Scheduled run — every weekday at 9 AM IST (3:30 AM UTC)
+  schedule:
+    - cron: "30 3 * * 1-5"
+
+jobs:
+  uat-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      HEADLESS: "true"
+      BASE_URL:       ${{ secrets.BASE_URL }}
+      SSO_EMAIL:      ${{ secrets.SSO_EMAIL }}
+      SSO_PASSWORD:   ${{ secrets.SSO_PASSWORD }}
+
+    steps:
+      # ── 1. Checkout code ────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ─────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 3. Chrome setup ─────────────────────────────────────────────────────
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      # ── 4. Run tests ────────────────────────────────────────────────────────
+      - name: Run UAT tests
+        run: |
+          pytest tests/ \
+            --tb=short \
+            --no-header \
+            -v \
+            2>&1 | tee pytest_output.txt
+        continue-on-error: true   # always upload report even if tests fail
+
+      # ── 5. Upload HTML report ────────────────────────────────────────────────
+      - name: Upload UAT Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: uat-report-${{ github.run_number }}
+          path: reports/
+          retention-days: 30
+
+      # ── 6. Upload screenshots on failure ────────────────────────────────────
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: screenshots/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # ── 7. Post result summary ───────────────────────────────────────────────
+      - name: Test summary
+        if: always()
+        run: |
+          echo "### UAT Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          cat pytest_output.txt | tail -20 >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
