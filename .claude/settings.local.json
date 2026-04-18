@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"c:\\\\Playwright Learnings\\\\.venv\\\\Scripts\\\\python.exe\" -c \"import playwright; print\\(playwright.__version__\\)\")",
+      "Bash(\"c:\\\\Playwright Learnings\\\\.venv\\\\Scripts\\\\python.exe\" -c \"from playwright.sync_api import sync_playwright; print\\('Playwright is installed'\\)\")",
+      "Bash(python -m pytest tests/test_project.py -v)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); from pages.login_page import LoginPage; print\\('OK'\\)\")",
+      "Bash(python -m pytest tests/test_project.py -v -s)"
+    ]
+  }
+}
